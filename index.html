@@ -57,13 +57,12 @@
 
     <!-- 主要程式碼：使用 text/babel 與 data-type="module" -->
     <script type="text/babel" data-type="module">
-        // 現在可以直接使用簡潔的模組名稱，Import Map 會負責找到正確網址
         import React, { useState, useRef, useEffect, useCallback } from 'react';
         import { createRoot } from 'react-dom/client';
         import { 
             Camera, Download, Image as ImageIcon, Type, Sticker, Layout, Palette, 
             Plus, X, Move, Trash2, Sparkles, Wand2, RefreshCcw, Play, Check, 
-            Upload, Scissors, Loader2 
+            Upload, Scissors, Loader2, ZoomIn, MousePointer2 
         } from 'lucide-react';
 
         // 定義貼紙分類與內容
@@ -83,7 +82,7 @@
             // Layout & Style
             const [layout, setLayout] = useState('strip'); // 'strip', 'grid', 'single'
             const [bgColor, setBgColor] = useState('#ffffff');
-            const [bgPattern, setBgPattern] = useState('none'); // 'none', 'dots', 'grid'
+            const [bgPattern, setBgPattern] = useState('none'); 
             const [frameWidth, setFrameWidth] = useState(24);
             const [borderRadius, setBorderRadius] = useState(0);
             const [isGradient, setIsGradient] = useState(false);
@@ -95,6 +94,16 @@
             
             // Content
             const [photos, setPhotos] = useState({ 0: null, 1: null, 2: null, 3: null });
+            
+            // Photo Transforms (Scale & Position) - NEW
+            const [photoTransforms, setPhotoTransforms] = useState({
+                0: { x: 0, y: 0, scale: 1 },
+                1: { x: 0, y: 0, scale: 1 },
+                2: { x: 0, y: 0, scale: 1 },
+                3: { x: 0, y: 0, scale: 1 }
+            });
+            const [activeSlot, setActiveSlot] = useState(null); // 目前選中的照片格子
+
             const [stickers, setStickers] = useState([]);
             const [activeCategory, setActiveCategory] = useState('花朵'); 
             const [bottomText, setBottomText] = useState('2025.12.25 MEMORIES');
@@ -123,6 +132,11 @@
             const frameInputRef = useRef(null); 
             const [activePhotoIndex, setActivePhotoIndex] = useState(null);
             const [uploadingFrameIndex, setUploadingFrameIndex] = useState(null);
+
+            // Dragging State for Photos
+            const isDraggingPhoto = useRef(false);
+            const dragStartPos = useRef({ x: 0, y: 0 });
+            const photoStartPos = useRef({ x: 0, y: 0 });
 
             // ----------------Helper Functions: Logic----------------
 
@@ -213,6 +227,12 @@
 
                     const newUrl = canvas.toDataURL('image/png');
                     setPhotos(prev => ({ ...prev, [index]: newUrl }));
+                    
+                    // 去背後重置該照片的位置和縮放，避免位置跑掉
+                    setPhotoTransforms(prev => ({
+                        ...prev,
+                        [index]: { x: 0, y: 0, scale: 1 }
+                    }));
 
                 } catch (error) {
                     console.error("Background removal failed:", error);
@@ -227,15 +247,23 @@
             const startCamera = async () => {
                 try {
                     const mediaStream = await navigator.mediaDevices.getUserMedia({ 
-                        video: { facingMode: "user", width: 1280, height: 720 } 
+                        video: { facingMode: "user", width: 1280, height: 720 },
+                        audio: false 
                     });
                     setStream(mediaStream);
                     setMode('camera'); 
                     setCountdown(null);
                     setCurrentShotIndex(0);
                 } catch (err) {
-                    alert("無法存取相機，請檢查瀏覽器權限設定。");
-                    console.error(err);
+                    let errorMessage = "無法啟動相機。\n";
+                    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                        errorMessage += "原因：存取權限被拒絕。\n請確認瀏覽器已允許相機權限。\n\n注意：如果您是在 Google Sites (協作平台) 執行，平台可能會基於安全理由阻擋嵌入程式碼的相機權限。";
+                    } else if (err.name === 'NotFoundError') {
+                        errorMessage += "原因：找不到相機裝置。";
+                    } else {
+                        errorMessage += `錯誤代碼：${err.name}\n錯誤訊息：${err.message}`;
+                    }
+                    alert(errorMessage);
                 }
             };
 
@@ -300,12 +328,18 @@
                 
                 const imageUrl = canvas.toDataURL('image/jpeg');
                 setPhotos(prev => ({ ...prev, [currentShotIndex]: imageUrl }));
+                // 拍照後重置位置
+                setPhotoTransforms(prev => ({
+                    ...prev,
+                    [currentShotIndex]: { x: 0, y: 0, scale: 1 }
+                }));
             };
 
 
             // ----------------Helper Functions: Editor----------------
 
-            const handlePhotoClick = (index) => {
+            const handlePhotoUploadClick = (index, e) => {
+                if (e) e.stopPropagation(); // 阻止觸發選取
                 setActivePhotoIndex(index);
                 fileInputRef.current.click();
             };
@@ -315,8 +349,92 @@
                 if (file && activePhotoIndex !== null) {
                     const imageUrl = URL.createObjectURL(file);
                     setPhotos((prev) => ({ ...prev, [activePhotoIndex]: imageUrl }));
+                    // 換照片時重置位置與縮放
+                    setPhotoTransforms(prev => ({
+                        ...prev,
+                        [activePhotoIndex]: { x: 0, y: 0, scale: 1 }
+                    }));
                 }
                 e.target.value = null;
+            };
+
+            // Photo Drag Logic
+            const handlePhotoMouseDown = (e, index) => {
+                // 如果是點擊了按鈕，不觸發拖曳
+                if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
+
+                e.preventDefault();
+                setActiveSlot(index); // 選中該格
+                isDraggingPhoto.current = true;
+                
+                // 記錄滑鼠起始位置
+                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                dragStartPos.current = { x: clientX, y: clientY };
+                
+                // 記錄圖片當前位置
+                photoStartPos.current = { 
+                    x: photoTransforms[index].x, 
+                    y: photoTransforms[index].y 
+                };
+            };
+
+            // Global Mouse Move for Dragging
+            useEffect(() => {
+                const handleGlobalMouseMove = (e) => {
+                    if (!isDraggingPhoto.current || activeSlot === null) return;
+
+                    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+                    const deltaX = clientX - dragStartPos.current.x;
+                    const deltaY = clientY - dragStartPos.current.y;
+
+                    // 考慮當前縮放比例，讓移動手感一致 (可選)
+                    // const currentScale = photoTransforms[activeSlot].scale;
+                    
+                    setPhotoTransforms(prev => ({
+                        ...prev,
+                        [activeSlot]: {
+                            ...prev[activeSlot],
+                            x: photoStartPos.current.x + deltaX,
+                            y: photoStartPos.current.y + deltaY
+                        }
+                    }));
+                };
+
+                const handleGlobalMouseUp = () => {
+                    isDraggingPhoto.current = false;
+                };
+
+                window.addEventListener('mousemove', handleGlobalMouseMove);
+                window.addEventListener('mouseup', handleGlobalMouseUp);
+                window.addEventListener('touchmove', handleGlobalMouseMove, { passive: false });
+                window.addEventListener('touchend', handleGlobalMouseUp);
+
+                return () => {
+                    window.removeEventListener('mousemove', handleGlobalMouseMove);
+                    window.removeEventListener('mouseup', handleGlobalMouseUp);
+                    window.removeEventListener('touchmove', handleGlobalMouseMove);
+                    window.removeEventListener('touchend', handleGlobalMouseUp);
+                };
+            }, [activeSlot, photoTransforms]);
+
+            // Update Scale
+            const handleScaleChange = (val) => {
+                if (activeSlot === null) return;
+                setPhotoTransforms(prev => ({
+                    ...prev,
+                    [activeSlot]: { ...prev[activeSlot], scale: Number(val) }
+                }));
+            };
+
+            const resetTransform = () => {
+                if (activeSlot === null) return;
+                setPhotoTransforms(prev => ({
+                    ...prev,
+                    [activeSlot]: { x: 0, y: 0, scale: 1 }
+                }));
             };
 
             const handleFrameSlotClick = (index) => {
@@ -393,21 +511,21 @@
                     alert("下載元件尚未載入完成，請稍候");
                     return;
                 }
-                captureImage();
+                // 下載前取消選取，避免框線被截圖
+                setActiveSlot(null);
+                setTimeout(() => captureImage(), 100);
             };
 
             const captureImage = () => {
                 const element = frameRef.current;
                 if (!element || !window.html2canvas) return;
                 
-                // 為了避免 html2canvas 截圖偏移，先暫時鎖定高度
-                const originalStyle = element.style.cssText;
-                
                 window.html2canvas(element, {
                     scale: 2,
                     backgroundColor: null,
                     useCORS: true,
                     logging: false,
+                    allowTaint: true, 
                 }).then(canvas => {
                     const link = document.createElement('a');
                     link.download = `photobooth-${Date.now()}.png`;
@@ -475,8 +593,8 @@
             const getFrameDimensions = () => {
                 switch(layout) {
                     case 'strip': return { width: '320px', minHeight: '860px' };
-                    case 'grid': return { width: '480px', minHeight: '600px' };
-                    case 'single': return { width: '600px', minHeight: '400px' }; 
+                    case 'grid': return { width: '620px', minHeight: '440px' };
+                    case 'single': return { width: '620px', minHeight: '440px' }; 
                     default: return { width: '320px', minHeight: '860px' };
                 }
             };
@@ -484,16 +602,10 @@
             const getGridLayout = () => {
                 switch(layout) {
                     case 'strip': return 'grid-cols-1 flex-1';
-                    case 'grid': return 'grid-cols-2 aspect-square';
+                    case 'grid': return 'grid-cols-2 flex-1';
                     case 'single': return 'grid-cols-1 flex-1';
                     default: return 'grid-cols-1 flex-1';
                 }
-            };
-
-            // 如果圖片載入失敗的替代處理 (Optional)
-            const handleImageError = (e) => {
-                e.target.style.display = 'none'; 
-                // 或者 e.target.src = 'placeholder.png';
             };
 
             return (
@@ -588,6 +700,38 @@
                     </div>
 
                     <hr className="border-neutral-700" />
+                    
+                    {/* NEW: Photo Adjustment Controls */}
+                    {activeSlot !== null && photos[activeSlot] && (
+                        <div className="bg-neutral-700/50 p-3 rounded-lg border border-pink-500/30">
+                            <div className="flex items-center gap-2 text-sm font-medium text-pink-300 mb-2">
+                                <ZoomIn className="w-4 h-4" /> 照片調整 (格 {activeSlot + 1})
+                            </div>
+                            <div className="space-y-2">
+                                <div className="flex justify-between text-xs text-neutral-300">
+                                    <span>縮放大小</span>
+                                    <span>{Math.round(photoTransforms[activeSlot].scale * 100)}%</span>
+                                </div>
+                                <input 
+                                    type="range" min="0.5" max="3" step="0.1"
+                                    value={photoTransforms[activeSlot].scale} 
+                                    onChange={(e) => handleScaleChange(e.target.value)}
+                                    className="w-full accent-pink-500 h-1 bg-neutral-600 rounded-lg appearance-none cursor-pointer"
+                                />
+                                <div className="flex gap-2 mt-2">
+                                    <button 
+                                        onClick={resetTransform}
+                                        className="flex-1 bg-neutral-600 hover:bg-neutral-500 text-xs py-1.5 rounded text-white"
+                                    >
+                                        重置位置/大小
+                                    </button>
+                                </div>
+                                <div className="text-[10px] text-neutral-400 text-center mt-1">
+                                    * 可直接在右側畫面拖曳照片移動
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     {/* 1. Beauty Filters */}
                     <div className="space-y-4">
@@ -817,44 +961,55 @@
                             {getPhotoSlots().map((index) => (
                             <div 
                                 key={index}
-                                onClick={() => handlePhotoClick(index)}
-                                className="relative bg-black/20 overflow-hidden cursor-pointer group hover:opacity-90 transition border border-white/10"
+                                // 改為 mousedown 事件處理選取和拖曳
+                                onMouseDown={(e) => handlePhotoMouseDown(e, index)}
+                                onTouchStart={(e) => handlePhotoMouseDown(e, index)}
+                                className={`relative bg-black/20 overflow-hidden cursor-grab active:cursor-grabbing group hover:opacity-100 transition border ${activeSlot === index ? 'border-pink-500 ring-2 ring-pink-500/50 z-10' : 'border-white/10'}`}
                                 style={{ 
-                                borderRadius: `${borderRadius}px`,
-                                backgroundColor: 'rgba(0,0,0,0.2)'
+                                    borderRadius: `${borderRadius}px`,
+                                    backgroundColor: 'rgba(0,0,0,0.2)'
                                 }}
                             >
                                 {photos[index] ? (
                                 <img 
                                     src={photos[index]} 
                                     alt="shot" 
-                                    className="w-full h-full object-cover" 
+                                    draggable={false} // 禁止預設圖片拖曳，使用自定義邏輯
+                                    className="w-full h-full object-cover origin-center pointer-events-none" 
                                     style={{
-                                        filter: getImageFilterStyle() 
+                                        filter: getImageFilterStyle(),
+                                        // 應用移動和縮放
+                                        transform: `translate(${photoTransforms[index].x}px, ${photoTransforms[index].y}px) scale(${photoTransforms[index].scale})`
                                     }}
                                 />
                                 ) : (
-                                <div className="w-full h-full flex flex-col items-center justify-center text-white/40">
+                                <div className="w-full h-full flex flex-col items-center justify-center text-white/40 pointer-events-none">
                                     <Plus className="w-8 h-8 mb-1 opacity-50" />
                                     <span className="text-xs font-medium">Pic {index + 1}</span>
                                 </div>
                                 )}
                                 
-                                <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center transition-opacity z-10 gap-3">
-                                <div className="text-white text-xs font-bold flex gap-1 items-center bg-white/20 px-3 py-1.5 rounded-full hover:bg-white/30 backdrop-blur-sm transition">
-                                    <ImageIcon className="w-3 h-3"/> 換照片
-                                </div>
-                                
-                                {photos[index] && (
+                                {/* Overlay Tools */}
+                                <div className={`absolute inset-0 bg-black/50 flex flex-col items-center justify-center transition-opacity z-20 gap-3 ${activeSlot === index ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                                    
+                                    {/* 只有選中或 hover 時顯示操作按鈕 */}
                                     <button 
-                                        onClick={(e) => handleRemoveBackground(index, e)}
-                                        className="text-white text-xs font-bold flex gap-1 items-center bg-pink-500/80 px-3 py-1.5 rounded-full hover:bg-pink-600/90 backdrop-blur-sm transition disabled:opacity-50"
-                                        disabled={isRemovingBg[index]}
+                                        onClick={(e) => handlePhotoUploadClick(index, e)}
+                                        className="text-white text-xs font-bold flex gap-1 items-center bg-white/20 px-3 py-1.5 rounded-full hover:bg-white/30 backdrop-blur-sm transition"
                                     >
-                                        {isRemovingBg[index] ? <Loader2 className="w-3 h-3 animate-spin"/> : <Scissors className="w-3 h-3"/>}
-                                        {isRemovingBg[index] ? "處理中" : "去背"}
+                                        <ImageIcon className="w-3 h-3"/> 換照片
                                     </button>
-                                )}
+                                    
+                                    {photos[index] && (
+                                        <button 
+                                            onClick={(e) => handleRemoveBackground(index, e)}
+                                            className="text-white text-xs font-bold flex gap-1 items-center bg-pink-500/80 px-3 py-1.5 rounded-full hover:bg-pink-600/90 backdrop-blur-sm transition disabled:opacity-50"
+                                            disabled={isRemovingBg[index]}
+                                        >
+                                            {isRemovingBg[index] ? <Loader2 className="w-3 h-3 animate-spin"/> : <Scissors className="w-3 h-3"/>}
+                                            {isRemovingBg[index] ? "處理中" : "去背"}
+                                        </button>
+                                    )}
                                 </div>
                             </div>
                             ))}
